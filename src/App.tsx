@@ -558,12 +558,19 @@ interface MessageAttachment {
   isImage: boolean;
   url: string;
   path: string;
+  dataBase64?: string;
+  mimeType?: string;
 }
 
 interface MessageEntry {
   id: string;
+  sender?: 'user' | 'assistant';
   text: string;
-  attachments: MessageAttachment[];
+  attachments?: MessageAttachment[];
+  imageUrl?: string;
+  chartSvg?: string;
+  isLoading?: boolean;
+  error?: string;
 }
 
 interface ChatSession {
@@ -701,19 +708,46 @@ function HomePage({
     handleStartNewChat();
   }
 
+  const [previewModalImage, setPreviewModalImage] = useState<string | null>(null);
+
   async function handleSend(e: React.FormEvent) {
     e.preventDefault();
     if (uploading) return;
-    if (!inputText.trim() && attachments.length === 0) return;
+    const trimmed = inputText.trim();
+    if (!trimmed && attachments.length === 0) return;
 
     setUploading(true);
     setUploadError(null);
+
+    const userEntryId = `${Date.now()}-${Math.random()}`;
+    const aiEntryId = `ai_${Date.now()}`;
 
     try {
       const uploadedAttachments: MessageAttachment[] = [];
 
       // Upload each attachment directly to the Supabase UPLOADS bucket
       for (const item of attachments) {
+        let base64: string | undefined;
+        let mimeType: string | undefined;
+
+        if (item.isImage) {
+          mimeType = item.file.type;
+          try {
+            base64 = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const res = reader.result as string;
+                const b64 = res.split(',')[1] || res;
+                resolve(b64);
+              };
+              reader.onerror = reject;
+              reader.readAsDataURL(item.file);
+            });
+          } catch (err) {
+            console.warn('Failed to read image as base64', err);
+          }
+        }
+
         const res = await uploadToSupabaseBucket(item.file, user.uid);
         uploadedAttachments.push({
           name: res.name,
@@ -721,19 +755,68 @@ function HomePage({
           isImage: item.isImage,
           url: res.signedUrl,
           path: res.path,
+          dataBase64: base64,
+          mimeType,
         });
       }
 
-      const newEntry: MessageEntry = {
-        id: `${Date.now()}-${Math.random()}`,
-        text: inputText.trim(),
+      const userEntry: MessageEntry = {
+        id: userEntryId,
+        sender: 'user',
+        text: trimmed,
         attachments: uploadedAttachments,
       };
 
-      const updatedEntries = [...entries, newEntry];
-      setEntries(updatedEntries);
+      const aiPlaceholder: MessageEntry = {
+        id: aiEntryId,
+        sender: 'assistant',
+        text: '',
+        isLoading: true,
+      };
+
+      const newEntriesWithAi = [...entries, userEntry, aiPlaceholder];
+      setEntries(newEntriesWithAi);
       setInputText('');
       setAttachments([]);
+
+      // Call full-stack AI generation endpoint
+      const apiRes = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: trimmed,
+          attachments: uploadedAttachments,
+        }),
+      });
+
+      const data = await apiRes.json();
+
+      let finalEntries: MessageEntry[];
+      if (apiRes.ok && data.success) {
+        finalEntries = newEntriesWithAi.map((entry) =>
+          entry.id === aiEntryId
+            ? {
+                ...entry,
+                isLoading: false,
+                text: data.text || '',
+                imageUrl: data.imageUrl,
+                chartSvg: data.chartSvg,
+              }
+            : entry
+        );
+      } else {
+        finalEntries = newEntriesWithAi.map((entry) =>
+          entry.id === aiEntryId
+            ? {
+                ...entry,
+                isLoading: false,
+                error: data.error || 'Failed to generate clinical design. Please try again.',
+              }
+            : entry
+        );
+      }
+
+      setEntries(finalEntries);
 
       // Persist to chat history sessions
       setSessions((prev) => {
@@ -741,11 +824,11 @@ function HomePage({
         const title =
           existingIdx !== -1 && prev[existingIdx].title
             ? prev[existingIdx].title
-            : newEntry.text
-            ? newEntry.text.slice(0, 36)
+            : userEntry.text
+            ? userEntry.text.slice(0, 36)
             : uploadedAttachments.length > 0
             ? `File: ${uploadedAttachments[0].name}`
-            : 'Conversation';
+            : 'Clinical Design';
 
         let nextSessions: ChatSession[];
         if (existingIdx !== -1) {
@@ -753,7 +836,7 @@ function HomePage({
           nextSessions[existingIdx] = {
             ...nextSessions[existingIdx],
             updatedAt: Date.now(),
-            entries: updatedEntries,
+            entries: finalEntries,
           };
         } else {
           const newSession: ChatSession = {
@@ -761,7 +844,7 @@ function HomePage({
             title,
             createdAt: Date.now(),
             updatedAt: Date.now(),
-            entries: updatedEntries,
+            entries: finalEntries,
           };
           nextSessions = [newSession, ...prev];
         }
@@ -769,8 +852,11 @@ function HomePage({
         return nextSessions;
       });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Upload failed. Please try again.';
+      const msg = err instanceof Error ? err.message : 'Generation failed. Please try again.';
       setUploadError(msg);
+      setEntries((prev) =>
+        prev.map((e) => (e.id === aiEntryId ? { ...e, isLoading: false, error: msg } : e))
+      );
     } finally {
       setUploading(false);
     }
@@ -973,70 +1059,202 @@ function HomePage({
             <CliGraphLogo className="size-16 rounded-2xl shadow-xl shadow-primary/25" />
           </div>
         ) : (
-          <div className="space-y-4 flex-1 py-4">
-            {entries.map((entry) => (
-              <div key={entry.id} className="flex flex-col items-end">
-                <div className="max-w-[85%] rounded-2xl bg-card border border-border p-4 shadow-sm space-y-2">
-                  {entry.attachments.length > 0 && (
-                    <div className="flex flex-wrap gap-2">
-                      {entry.attachments.map((file, i) => (
-                        <a
-                          key={i}
-                          href={file.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-2 rounded-xl bg-muted/60 p-2 text-xs text-foreground border border-border/50 transition hover:border-primary/50 hover:bg-muted group"
-                          title="Open from Supabase uploads bucket"
-                        >
-                          {file.isImage ? (
+          <div className="space-y-6 flex-1 py-4">
+            {entries.map((entry) => {
+              const isAssistant = entry.sender === 'assistant';
+
+              if (isAssistant) {
+                return (
+                  <div key={entry.id} className="flex flex-col items-start space-y-2">
+                    <div className="flex items-center gap-2 px-1">
+                      <CliGraphLogo className="size-5 rounded-md" />
+                      <span className="font-display text-xs font-bold text-foreground">CliGraph AI</span>
+                      <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary font-semibold">
+                        AI Image
+                      </span>
+                    </div>
+
+                    <div className="max-w-[95%] sm:max-w-[88%] rounded-2xl bg-card border border-primary/20 p-4 shadow-md shadow-primary/5 space-y-3.5">
+                      {/* Loading State */}
+                      {entry.isLoading && (
+                        <div className="flex items-center gap-3 py-3 px-2">
+                          <div className="relative flex size-6 items-center justify-center">
+                            <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/40 opacity-75" />
+                            <span className="relative inline-flex size-3.5 rounded-full bg-primary" />
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-semibold text-foreground">
+                              Generating image with Stability AI…
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">
+                              Creating high-resolution image based on your prompt.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Error State */}
+                      {entry.error && (
+                        <div className="rounded-xl bg-destructive/10 border border-destructive/25 p-3 text-xs text-destructive space-y-1">
+                          <div className="flex items-center gap-2 font-semibold">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-4 shrink-0">
+                              <circle cx="12" cy="12" r="10" />
+                              <line x1="12" y1="8" x2="12" y2="12" />
+                              <line x1="12" y1="16" x2="12.01" y2="16" />
+                            </svg>
+                            <span>Generation Notice</span>
+                          </div>
+                          <p className="text-[11px] leading-relaxed opacity-90">{entry.error}</p>
+                        </div>
+                      )}
+
+                      {/* Generated Design Image */}
+                      {entry.imageUrl && (
+                        <div className="space-y-2 overflow-hidden rounded-xl border border-border/80 bg-black/40">
+                          <div
+                            onClick={() => setPreviewModalImage(entry.imageUrl!)}
+                            className="group relative cursor-pointer overflow-hidden max-h-[420px] flex items-center justify-center bg-black/70"
+                          >
                             <img
-                              src={file.url}
-                              alt={file.name}
-                              className="size-10 rounded-lg object-cover"
+                              src={entry.imageUrl}
+                              alt="Generated AI Image"
+                              className="w-full h-auto object-contain max-h-[420px] transition-transform duration-300 group-hover:scale-[1.02]"
                             />
-                          ) : (
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 text-white text-xs font-medium backdrop-blur-xs">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-4">
+                                <circle cx="11" cy="11" r="8" />
+                                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                <line x1="11" y1="8" x2="11" y2="14" />
+                                <line x1="8" y1="11" x2="14" y2="11" />
+                              </svg>
+                              <span>Click to enlarge</span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between px-3 py-2 border-t border-border/60 bg-card/60">
+                            <span className="text-[11px] text-muted-foreground font-medium">
+                              Stability AI Render
+                            </span>
+                            <a
+                              href={entry.imageUrl}
+                              download="cligraph-generated-image.png"
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-primary/10 hover:bg-primary hover:text-primary-foreground text-primary px-2.5 py-1 text-xs font-semibold transition"
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-3.5">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                <polyline points="7 10 12 15 17 10" />
+                                <line x1="12" y1="15" x2="12" y2="3" />
+                              </svg>
+                              <span>Download Image</span>
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Generated SVG Clinical Chart */}
+                      {entry.chartSvg && (
+                        <div className="space-y-2 overflow-hidden rounded-xl border border-border/80 bg-slate-950 p-2 sm:p-3">
+                          <div
+                            className="w-full overflow-x-auto flex items-center justify-center"
+                            dangerouslySetInnerHTML={{ __html: entry.chartSvg }}
+                          />
+                          <div className="flex items-center justify-between pt-1 border-t border-border/40 text-[11px] text-muted-foreground">
+                            <span>Clinical Vector Visualization</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const blob = new Blob([entry.chartSvg!], { type: 'image/svg+xml' });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = 'cligraph-chart.svg';
+                                a.click();
+                                URL.revokeObjectURL(url);
+                              }}
+                              className="text-primary hover:underline font-semibold"
+                            >
+                              Download SVG
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Text / Clinical Analysis */}
+                      {entry.text && (
+                        <div className="text-xs sm:text-sm text-foreground whitespace-pre-wrap leading-relaxed font-sans">
+                          {entry.text}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              }
+
+              // User Message
+              return (
+                <div key={entry.id} className="flex flex-col items-end">
+                  <div className="max-w-[85%] rounded-2xl bg-card border border-border p-4 shadow-sm space-y-2">
+                    {entry.attachments && entry.attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {entry.attachments.map((file, i) => (
+                          <a
+                            key={i}
+                            href={file.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-2 rounded-xl bg-muted/60 p-2 text-xs text-foreground border border-border/50 transition hover:border-primary/50 hover:bg-muted group"
+                            title="Open from Supabase uploads bucket"
+                          >
+                            {file.isImage ? (
+                              <img
+                                src={file.url}
+                                alt={file.name}
+                                className="size-10 rounded-lg object-cover"
+                              />
+                            ) : (
+                              <svg
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                className="size-4 text-primary shrink-0"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                              >
+                                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                                <polyline points="14 2 14 8 20 8" />
+                              </svg>
+                            )}
+                            <div className="min-w-0 pr-1">
+                              <p className="font-medium truncate max-w-[140px] group-hover:text-primary transition">
+                                {file.name}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {file.sizeFormatted} · Supabase
+                              </p>
+                            </div>
                             <svg
                               viewBox="0 0 24 24"
                               fill="none"
-                              className="size-4 text-primary shrink-0"
                               stroke="currentColor"
                               strokeWidth="2"
+                              className="size-3 text-muted-foreground opacity-60 group-hover:opacity-100 shrink-0"
                             >
-                              <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-                              <polyline points="14 2 14 8 20 8" />
+                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                              <polyline points="15 3 21 3 21 9" />
+                              <line x1="10" y1="14" x2="21" y2="3" />
                             </svg>
-                          )}
-                          <div className="min-w-0 pr-1">
-                            <p className="font-medium truncate max-w-[140px] group-hover:text-primary transition">
-                              {file.name}
-                            </p>
-                            <p className="text-[10px] text-muted-foreground">
-                              {file.sizeFormatted} · Supabase
-                            </p>
-                          </div>
-                          <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            className="size-3 text-muted-foreground opacity-60 group-hover:opacity-100 shrink-0"
-                          >
-                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                            <polyline points="15 3 21 3 21 9" />
-                            <line x1="10" y1="14" x2="21" y2="3" />
-                          </svg>
-                        </a>
-                      ))}
-                    </div>
-                  )}
-                  {entry.text && (
-                    <p className="text-sm text-foreground whitespace-pre-wrap leading-relaxed">
-                      {entry.text}
-                    </p>
-                  )}
+                          </a>
+                        ))}
+                      </div>
+                    )}
+                    {entry.text && (
+                      <p className="text-sm text-foreground whitespace-pre-wrap leading-relaxed">
+                        {entry.text}
+                      </p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div ref={bottomRef} />
           </div>
         )}
@@ -1174,6 +1392,59 @@ function HomePage({
           </button>
         </form>
       </div>
+
+      {/* Image Preview Lightbox Modal */}
+      {previewModalImage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+          <div
+            className="fixed inset-0 cursor-pointer"
+            onClick={() => setPreviewModalImage(null)}
+            aria-hidden="true"
+          />
+          <div className="relative z-10 max-h-[90dvh] max-w-4xl overflow-hidden rounded-2xl bg-card border border-border shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between border-b border-border/80 px-4 py-3 bg-card/90">
+              <div className="flex items-center gap-2">
+                <CliGraphLogo className="size-5 rounded-md" />
+                <span className="font-display text-sm font-bold text-foreground">
+                  Clinical Design Preview
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={previewModalImage}
+                  download="cligraph-clinical-design.png"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-3.5">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  <span>Download</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPreviewModalImage(null)}
+                  className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground transition"
+                  aria-label="Close preview"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-5">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div className="overflow-auto p-2 sm:p-4 bg-black/90 flex items-center justify-center">
+              <img
+                src={previewModalImage}
+                alt="Full Clinical Design"
+                className="max-h-[75dvh] w-auto object-contain rounded-lg shadow-lg"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
