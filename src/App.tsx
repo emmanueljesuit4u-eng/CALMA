@@ -9,34 +9,17 @@ import { supabase } from './lib/supabase.ts';
 // Logo icon matching CliGraph brand
 function CliGraphLogo({ className }: { className?: string }) {
   return (
-    <span
-      className={`brand-gradient inline-flex items-center justify-center rounded-2xl shadow-lg shadow-primary/25 ${
+    <div
+      className={`relative inline-flex items-center justify-center overflow-hidden rounded-2xl border border-primary/25 bg-black shadow-lg shadow-primary/25 ${
         className ?? 'size-12'
       }`}
     >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        className="size-6"
-        aria-hidden="true"
-      >
-        <path
-          d="M3 13.5 8 9l4 5 3-3.5 5 4"
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="text-primary-foreground"
-        />
-        <path
-          d="M3 19h18"
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          className="text-primary-foreground/50"
-        />
-      </svg>
-    </span>
+      <img
+        src="/assets/cligraph-lion.png"
+        alt="CliGraph Logo"
+        className="size-full object-cover select-none pointer-events-none"
+      />
+    </div>
   );
 }
 
@@ -90,29 +73,7 @@ function WelcomeGate({ onNavigate }: { onNavigate: (to: string) => void }) {
   return (
     <div className="auth-shell flex min-h-dvh flex-col px-6 py-10">
       <div className="flex flex-1 flex-col items-center justify-center text-center">
-        <span className="brand-gradient flex size-16 items-center justify-center rounded-3xl shadow-xl shadow-primary/25">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            className="size-9 text-primary-foreground"
-            aria-hidden="true"
-          >
-            <path
-              d="M3 13.5 8 9l4 5 3-3.5 5 4"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            <path
-              d="M3 19h18"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              opacity="0.5"
-            />
-          </svg>
-        </span>
+        <CliGraphLogo className="size-20 rounded-3xl shadow-2xl shadow-primary/30" />
         <h1 className="font-display mt-6 text-3xl font-bold tracking-tight text-foreground">
           CliGraph
         </h1>
@@ -597,29 +558,7 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
       <main className="flex-1 flex flex-col max-w-3xl w-full mx-auto p-4 sm:p-6 overflow-y-auto">
         {entries.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center text-center py-12">
-            <span className="brand-gradient flex size-14 items-center justify-center rounded-2xl shadow-lg shadow-primary/25">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                className="size-7 text-primary-foreground"
-                aria-hidden="true"
-              >
-                <path
-                  d="M3 13.5 8 9l4 5 3-3.5 5 4"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d="M3 19h18"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  opacity="0.5"
-                />
-              </svg>
-            </span>
+            <CliGraphLogo className="size-16 rounded-2xl shadow-xl shadow-primary/25" />
           </div>
         ) : (
           <div className="space-y-4 flex-1 py-4">
