@@ -4,9 +4,19 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { supabase } from './lib/supabase.ts';
+import {
+  auth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signOut,
+  onAuthStateChanged,
+  type User,
+} from './lib/firebase.ts';
+import { uploadToSupabaseBucket } from './lib/storage.ts';
 
-// Logo icon matching CliGraph brand
+// Logo icon using the lion head emblem
 function CliGraphLogo({ className }: { className?: string }) {
   return (
     <div
@@ -27,6 +37,7 @@ function CliGraphLogo({ className }: { className?: string }) {
 function FormInput({
   id,
   label,
+  labelRight,
   type,
   value,
   onChange,
@@ -36,6 +47,7 @@ function FormInput({
 }: {
   id: string;
   label: string;
+  labelRight?: React.ReactNode;
   type: string;
   value: string;
   onChange: (val: string) => void;
@@ -45,9 +57,12 @@ function FormInput({
 }) {
   return (
     <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-semibold text-foreground">
-        {label}
-      </label>
+      <div className="flex items-center justify-between">
+        <label htmlFor={id} className="block text-sm font-semibold text-foreground">
+          {label}
+        </label>
+        {labelRight}
+      </div>
       <div className="relative">
         <input
           id={id}
@@ -62,6 +77,33 @@ function FormInput({
       </div>
     </div>
   );
+}
+
+function formatFirebaseAuthError(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code: string }).code;
+    switch (code) {
+      case 'auth/invalid-credential':
+      case 'auth/user-not-found':
+      case 'auth/wrong-password':
+        return 'Incorrect email or password.';
+      case 'auth/email-already-in-use':
+        return 'This email is already registered. Please log in.';
+      case 'auth/weak-password':
+        return 'Password must be at least 8 characters.';
+      case 'auth/invalid-email':
+        return 'Enter a valid email address.';
+      case 'auth/too-many-requests':
+        return 'Too many attempts. Please try again later.';
+      case 'auth/popup-closed-by-user':
+        return 'Sign in was cancelled.';
+      default:
+        if ('message' in error && typeof (error as { message: string }).message === 'string') {
+          return (error as { message: string }).message;
+        }
+    }
+  }
+  return error instanceof Error ? error.message : 'Authentication failed. Please try again.';
 }
 
 // 1. Welcome Gate Screen (Route: `/` or `/welcome`)
@@ -102,9 +144,9 @@ function WelcomeGate({ onNavigate }: { onNavigate: (to: string) => void }) {
   );
 }
 
-// 2. Authentication Screen (Route: `/auth`)
+// 2. Authentication Screen (Route: `/auth`) powered by FIREBASE AUTH
 function AuthPage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) => void }) {
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
+  const [mode, setMode] = useState<'signin' | 'signup' | 'forgot'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -112,43 +154,30 @@ function AuthPage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [verificationSent, setVerificationSent] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
 
   useEffect(() => {
-    document.title = 'Sign in — CliGraph';
+    document.title =
+      mode === 'forgot'
+        ? 'Reset Password — CliGraph'
+        : mode === 'signup'
+        ? 'Create Account — CliGraph'
+        : 'Sign in — CliGraph';
+  }, [mode]);
 
-    // Parse potential errors in URL hash (e.g. expired confirmation links)
-    if (window.location.hash) {
-      const hashParams = new URLSearchParams(window.location.hash.substring(1));
-      const errorDesc = hashParams.get('error_description');
-      if (errorDesc) {
-        setError(errorDesc.replace(/\+/g, ' '));
-      }
-    }
-
-    // Redirect to home if already authenticated
-    let active = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (active && data.session) {
-        onNavigate('/home', true);
-      }
-    });
-
-    return () => {
-      active = false;
-    };
-  }, [onNavigate]);
-
-  function switchTab(newMode: 'signin' | 'signup') {
+  function switchTab(newMode: 'signin' | 'signup' | 'forgot') {
     setMode(newMode);
     setError(null);
     setPassword('');
     setConfirmPassword('');
+    setResetSent(false);
   }
 
   function validate() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
       return 'Enter a valid email address.';
     }
+    if (mode === 'forgot') return null;
     if (password.length < 8) {
       return 'Password must be at least 8 characters.';
     }
@@ -170,42 +199,23 @@ function AuthPage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
 
     setLoading(true);
     try {
-      if (mode === 'signup') {
-        const { data, error: signupError } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-          options: {
-            emailRedirectTo: window.location.origin,
-          },
-        });
-
-        if (signupError) {
-          setError(signupError.message);
-          return;
+      if (mode === 'forgot') {
+        await sendPasswordResetEmail(auth, email.trim());
+        setResetSent(true);
+      } else if (mode === 'signup') {
+        const userCred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        try {
+          await sendEmailVerification(userCred.user);
+        } catch (e) {
+          console.warn('Email verification send notice:', e);
         }
-
-        if (data.session) {
-          onNavigate('/home', true);
-        } else {
-          setVerificationSent(true);
-        }
+        setVerificationSent(true);
       } else {
-        const { error: signinError } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
-          password,
-        });
-
-        if (signinError) {
-          setError(
-            signinError.message === 'Invalid login credentials'
-              ? 'Incorrect email or password.'
-              : signinError.message
-          );
-          return;
-        }
-
+        await signInWithEmailAndPassword(auth, email.trim(), password);
         onNavigate('/home', true);
       }
+    } catch (err) {
+      setError(formatFirebaseAuthError(err));
     } finally {
       setLoading(false);
     }
@@ -267,12 +277,113 @@ function AuthPage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
     );
   }
 
+  // Forgot Password Screen
+  if (mode === 'forgot') {
+    return (
+      <div className="auth-shell flex min-h-dvh flex-col px-6 py-10">
+        <div className="flex flex-1 items-center justify-center">
+          <div className="w-full max-w-sm">
+            <div className="text-center">
+              <CliGraphLogo className="mx-auto size-16" />
+              <h1 className="font-display mt-5 text-2xl font-bold tracking-tight text-foreground">
+                Reset your password
+              </h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Enter your registered email and we&apos;ll send you a password reset link.
+              </p>
+            </div>
+
+            <div className="mt-7 rounded-3xl border border-border bg-card p-6 shadow-xl shadow-primary/5">
+              {resetSent ? (
+                <div className="text-center py-2 space-y-4">
+                  <div className="mx-auto flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className="size-6"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                      <polyline points="22 4 12 14.01 9 11.01" />
+                    </svg>
+                  </div>
+                  <h2 className="font-display text-lg font-bold text-foreground">
+                    Reset link sent!
+                  </h2>
+                  <p className="text-sm leading-relaxed text-muted-foreground">
+                    We sent a password reset link to{' '}
+                    <span className="font-semibold text-foreground">{email.trim()}</span>. Please
+                    check your inbox (and spam folder) to reset your password.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => switchTab('signin')}
+                    className="mt-3 font-display h-12 w-full rounded-xl bg-primary text-base font-semibold text-primary-foreground transition hover:bg-primary/90"
+                  >
+                    Back to log in
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+                  {error && (
+                    <p
+                      role="alert"
+                      className="rounded-xl bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive"
+                    >
+                      {error}
+                    </p>
+                  )}
+
+                  <FormInput
+                    id="email"
+                    label="Email"
+                    type="email"
+                    value={email}
+                    onChange={setEmail}
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                  />
+
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="font-display h-12 w-full rounded-xl bg-primary text-base font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:opacity-60"
+                  >
+                    {loading ? 'Sending link…' : 'Send reset link'}
+                  </button>
+
+                  <div className="pt-2 text-center">
+                    <button
+                      type="button"
+                      onClick={() => switchTab('signin')}
+                      className="text-sm font-semibold text-muted-foreground hover:text-foreground transition"
+                    >
+                      Remember your password?{' '}
+                      <span className="text-primary underline-offset-2 hover:underline">
+                        Log in
+                      </span>
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <p className="pt-6 text-center text-xs text-muted-foreground/80">
+          CliGraph · Powered by Firebase Auth &amp; Supabase Storage
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="auth-shell flex min-h-dvh flex-col px-6 py-10">
       <div className="flex flex-1 items-center justify-center">
         <div className="w-full max-w-sm">
           <div className="text-center">
-            <CliGraphLogo className="mx-auto size-14" />
+            <CliGraphLogo className="mx-auto size-16" />
             <h1 className="font-display mt-5 text-2xl font-bold tracking-tight text-foreground">
               {mode === 'signin' ? 'Welcome back' : 'Create your account'}
             </h1>
@@ -324,6 +435,21 @@ function AuthPage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
               <FormInput
                 id="password"
                 label="Password"
+                labelRight={
+                  mode === 'signin' ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode('forgot');
+                        setError(null);
+                        setResetSent(false);
+                      }}
+                      className="text-xs font-semibold text-primary underline-offset-2 hover:underline"
+                    >
+                      Forgot password?
+                    </button>
+                  ) : undefined
+                }
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={setPassword}
@@ -411,55 +537,54 @@ function AuthPage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
       </div>
 
       <p className="pt-6 text-center text-xs text-muted-foreground/80">
-        CliGraph · Secure sign-in
+        CliGraph · Powered by Firebase Auth &amp; Supabase Storage
       </p>
     </div>
   );
 }
 
-// 3. Home Screen (Route: `/home`)
-interface FileAttachment {
+// 3. Home / Dashboard Screen (Route: `/home` or `/dashboard`)
+interface PendingAttachment {
+  file: File;
   name: string;
   sizeFormatted: string;
   isImage: boolean;
   previewUrl?: string;
 }
 
+interface MessageAttachment {
+  name: string;
+  sizeFormatted: string;
+  isImage: boolean;
+  url: string;
+  path: string;
+}
+
 interface MessageEntry {
   id: string;
   text: string;
-  attachments: FileAttachment[];
+  attachments: MessageAttachment[];
 }
 
-// 3. Dashboard Screen (Route: `/home` or `/dashboard`)
-function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) => void }) {
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+function HomePage({
+  user,
+  onNavigate,
+}: {
+  user: User;
+  onNavigate: (to: string, replace?: boolean) => void;
+}) {
   const [signingOut, setSigningOut] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
   const [inputText, setInputText] = useState('');
-  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [entries, setEntries] = useState<MessageEntry[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const bottomRef = React.useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     document.title = 'CliGraph';
-
-    let active = true;
-    supabase.auth.getUser().then(({ data }) => {
-      if (!active) return;
-      if (!data.user) {
-        onNavigate('/auth', true);
-      } else {
-        setUserEmail(data.user.email ?? null);
-        setCheckingAuth(false);
-      }
-    });
-
-    return () => {
-      active = false;
-    };
-  }, [onNavigate]);
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -475,10 +600,11 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const newAttachments: FileAttachment[] = [];
+    const newAttachments: PendingAttachment[] = [];
     Array.from(files).forEach((file) => {
       const isImg = file.type.startsWith('image/');
       newAttachments.push({
+        file,
         name: file.name,
         sizeFormatted: formatBytes(file.size),
         isImage: isImg,
@@ -487,44 +613,68 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
     });
 
     setAttachments((prev) => [...prev, ...newAttachments]);
+    setUploadError(null);
     e.target.value = '';
   }
 
   function removeAttachment(index: number) {
-    setAttachments((prev) => prev.filter((_, i) => i !== index));
+    setAttachments((prev) => {
+      const item = prev[index];
+      if (item?.previewUrl) {
+        URL.revokeObjectURL(item.previewUrl);
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }
 
-  function handleSend(e: React.FormEvent) {
+  async function handleSend(e: React.FormEvent) {
     e.preventDefault();
+    if (uploading) return;
     if (!inputText.trim() && attachments.length === 0) return;
 
-    const newEntry: MessageEntry = {
-      id: `${Date.now()}-${Math.random()}`,
-      text: inputText.trim(),
-      attachments: [...attachments],
-    };
+    setUploading(true);
+    setUploadError(null);
 
-    setEntries((prev) => [...prev, newEntry]);
-    setInputText('');
-    setAttachments([]);
+    try {
+      const uploadedAttachments: MessageAttachment[] = [];
+
+      // Upload each attachment directly to the Supabase UPLOADS bucket
+      for (const item of attachments) {
+        const res = await uploadToSupabaseBucket(item.file, user.uid);
+        uploadedAttachments.push({
+          name: res.name,
+          sizeFormatted: item.sizeFormatted,
+          isImage: item.isImage,
+          url: res.signedUrl,
+          path: res.path,
+        });
+      }
+
+      const newEntry: MessageEntry = {
+        id: `${Date.now()}-${Math.random()}`,
+        text: inputText.trim(),
+        attachments: uploadedAttachments,
+      };
+
+      setEntries((prev) => [...prev, newEntry]);
+      setInputText('');
+      setAttachments([]);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Upload failed. Please try again.';
+      setUploadError(msg);
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function handleSignOut() {
     setSigningOut(true);
     try {
-      await supabase.auth.signOut();
+      await signOut(auth);
       onNavigate('/auth', true);
     } catch {
       setSigningOut(false);
     }
-  }
-
-  if (checkingAuth) {
-    return (
-      <div className="auth-shell flex min-h-dvh flex-col items-center justify-center px-6 py-10">
-        <div className="size-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-      </div>
-    );
   }
 
   return (
@@ -538,9 +688,9 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
           </span>
         </div>
         <div className="flex items-center gap-3">
-          {userEmail && (
+          {user.email && (
             <span className="text-xs text-muted-foreground hidden sm:inline font-medium">
-              {userEmail}
+              {user.email}
             </span>
           )}
           <button
@@ -568,13 +718,17 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
                   {entry.attachments.length > 0 && (
                     <div className="flex flex-wrap gap-2">
                       {entry.attachments.map((file, i) => (
-                        <div
+                        <a
                           key={i}
-                          className="flex items-center gap-2 rounded-xl bg-muted/60 p-2 text-xs text-foreground border border-border/50"
+                          href={file.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2 rounded-xl bg-muted/60 p-2 text-xs text-foreground border border-border/50 transition hover:border-primary/50 hover:bg-muted group"
+                          title="Open from Supabase uploads bucket"
                         >
-                          {file.isImage && file.previewUrl ? (
+                          {file.isImage ? (
                             <img
-                              src={file.previewUrl}
+                              src={file.url}
                               alt={file.name}
                               className="size-10 rounded-lg object-cover"
                             />
@@ -590,13 +744,26 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
                               <polyline points="14 2 14 8 20 8" />
                             </svg>
                           )}
-                          <div className="min-w-0">
-                            <p className="font-medium truncate max-w-[140px]">{file.name}</p>
+                          <div className="min-w-0 pr-1">
+                            <p className="font-medium truncate max-w-[140px] group-hover:text-primary transition">
+                              {file.name}
+                            </p>
                             <p className="text-[10px] text-muted-foreground">
-                              {file.sizeFormatted}
+                              {file.sizeFormatted} · Supabase
                             </p>
                           </div>
-                        </div>
+                          <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            className="size-3 text-muted-foreground opacity-60 group-hover:opacity-100 shrink-0"
+                          >
+                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                            <polyline points="15 3 21 3 21 9" />
+                            <line x1="10" y1="14" x2="21" y2="3" />
+                          </svg>
+                        </a>
                       ))}
                     </div>
                   )}
@@ -613,11 +780,23 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
         )}
       </main>
 
-      {/* Input bar matching requirement:
+      {/* Input bar:
           1. placeholder to type in text and a send button by the side.
-          2. a + on by the left to upload files.
-          no extra text or generic stuff. */}
+          2. a + on by the left to upload files to the Supabase UPLOADS bucket. */}
       <div className="sticky bottom-0 px-4 pb-6 pt-2 max-w-3xl w-full mx-auto">
+        {uploadError && (
+          <div className="mb-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-xs font-medium text-destructive flex items-center justify-between">
+            <span>{uploadError}</span>
+            <button
+              type="button"
+              onClick={() => setUploadError(null)}
+              className="text-destructive font-bold text-sm px-1"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2 p-2.5 rounded-2xl bg-card/90 border border-border backdrop-blur-sm">
             {attachments.map((file, idx) => (
@@ -647,6 +826,7 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
                 <button
                   type="button"
                   onClick={() => removeAttachment(idx)}
+                  disabled={uploading}
                   className="text-muted-foreground hover:text-foreground rounded-full p-0.5 transition"
                   aria-label="Remove"
                 >
@@ -674,13 +854,15 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
             multiple
             ref={fileInputRef}
             onChange={handleFileChange}
+            disabled={uploading}
             className="hidden"
           />
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
             aria-label="Upload files"
-            className="flex size-11 items-center justify-center rounded-xl text-muted-foreground transition hover:bg-muted hover:text-foreground shrink-0"
+            className="flex size-11 items-center justify-center rounded-xl text-muted-foreground transition hover:bg-muted hover:text-foreground shrink-0 disabled:opacity-40"
           >
             <svg
               viewBox="0 0 24 24"
@@ -699,29 +881,39 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
             type="text"
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
-            placeholder="Type a message..."
-            className="flex-1 bg-transparent px-2 text-base text-foreground outline-none placeholder:text-muted-foreground/70"
+            disabled={uploading}
+            placeholder={uploading ? 'Uploading to Supabase UPLOADS…' : 'Type a message...'}
+            className="flex-1 bg-transparent px-2 text-base text-foreground outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
           />
 
           <button
             type="submit"
-            disabled={!inputText.trim() && attachments.length === 0}
+            disabled={uploading || (!inputText.trim() && attachments.length === 0)}
             aria-label="Send"
             className="flex h-11 items-center justify-center gap-1.5 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:opacity-40 shrink-0"
           >
-            <span>Send</span>
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="size-4"
-            >
-              <path d="m22 2-7 20-4-9-9-4Z" />
-              <path d="M22 2 11 13" />
-            </svg>
+            {uploading ? (
+              <>
+                <div className="size-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                <span className="hidden sm:inline">Uploading…</span>
+              </>
+            ) : (
+              <>
+                <span>Send</span>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="size-4"
+                >
+                  <path d="m22 2-7 20-4-9-9-4Z" />
+                  <path d="M22 2 11 13" />
+                </svg>
+              </>
+            )}
           </button>
         </form>
       </div>
@@ -731,6 +923,8 @@ function HomePage({ onNavigate }: { onNavigate: (to: string, replace?: boolean) 
 
 // Main App component with routing
 export default function App() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authInitialized, setAuthInitialized] = useState(false);
   const [currentPath, setCurrentPath] = useState<string>(() => {
     return window.location.pathname || '/';
   });
@@ -750,12 +944,18 @@ export default function App() {
     };
     window.addEventListener('popstate', handlePopState);
 
-    // Listen to Supabase auth state changes (e.g. email verification tokens in URL hash)
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_IN' && session) {
-        navigate('/home', true);
-      } else if (event === 'SIGNED_OUT') {
-        if (window.location.pathname === '/home' || window.location.pathname === '/dashboard') {
+    // Single central authoritative Firebase Auth listener
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setAuthInitialized(true);
+
+      const path = window.location.pathname;
+      if (user) {
+        if (path === '/auth') {
+          navigate('/home', true);
+        }
+      } else {
+        if (path === '/home' || path === '/dashboard') {
           navigate('/auth', true);
         }
       }
@@ -763,15 +963,26 @@ export default function App() {
 
     return () => {
       window.removeEventListener('popstate', handlePopState);
-      authListener?.subscription?.unsubscribe();
+      unsubscribe();
     };
   }, []);
+
+  if (!authInitialized) {
+    return (
+      <div className="auth-shell flex min-h-dvh flex-col items-center justify-center px-6 py-10">
+        <div className="size-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      </div>
+    );
+  }
 
   // Normalize path
   const normalizedPath = currentPath === '/welcome' ? '/' : currentPath;
 
   if (normalizedPath === '/home' || normalizedPath === '/dashboard') {
-    return <HomePage onNavigate={navigate} />;
+    if (!currentUser) {
+      return <AuthPage onNavigate={navigate} />;
+    }
+    return <HomePage user={currentUser} onNavigate={navigate} />;
   }
 
   if (normalizedPath === '/auth') {
