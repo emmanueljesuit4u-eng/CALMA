@@ -1,0 +1,6 @@
+{
+  "name": "CliGraph",
+  "description": "CliGraph — charts and clinical insights in one mobile app. Authentication and welcome gate with email verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
