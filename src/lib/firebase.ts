@@ -10,7 +10,29 @@ import {
   type User,
 } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import rawConfig from '../../firebase-applet-config.json';
+
+const firebaseConfig = {
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || rawConfig.projectId || 'jambix-46748',
+  appId:
+    import.meta.env.VITE_FIREBASE_APP_ID ||
+    rawConfig.appId ||
+    '1:29602655153:web:cf14965dfb61a3de8deb90',
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || rawConfig.apiKey,
+  authDomain:
+    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ||
+    rawConfig.authDomain ||
+    'jambix-46748.firebaseapp.com',
+  firestoreDatabaseId:
+    import.meta.env.VITE_FIREBASE_DATABASE_ID ||
+    rawConfig.firestoreDatabaseId ||
+    'ai-studio-cligraph-4e1d996b-af86-454c-af65-05a458031970',
+  storageBucket:
+    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+    rawConfig.storageBucket ||
+    'jambix-46748.firebasestorage.app',
+  messagingSenderId: rawConfig.messagingSenderId || '29602655153',
+};
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
