@@ -566,6 +566,41 @@ interface MessageEntry {
   attachments: MessageAttachment[];
 }
 
+interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  entries: MessageEntry[];
+}
+
+function getSavedSessions(userId: string): ChatSession[] {
+  try {
+    const raw = localStorage.getItem(`cligraph_sessions_${userId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSessions(userId: string, sessions: ChatSession[]) {
+  try {
+    localStorage.setItem(`cligraph_sessions_${userId}`, JSON.stringify(sessions));
+  } catch (err) {
+    console.warn('Could not save chat sessions:', err);
+  }
+}
+
+function formatSessionDate(timestamp: number) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+  if (isToday) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
 function HomePage({
   user,
   onNavigate,
@@ -573,6 +608,9 @@ function HomePage({
   user: User;
   onNavigate: (to: string, replace?: boolean) => void;
 }) {
+  const [sessions, setSessions] = useState<ChatSession[]>(() => getSavedSessions(user.uid));
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => 'chat_' + Date.now());
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -627,6 +665,42 @@ function HomePage({
     });
   }
 
+  function handleStartNewChat() {
+    const newId = 'chat_' + Date.now();
+    setCurrentSessionId(newId);
+    setEntries([]);
+    setInputText('');
+    setAttachments([]);
+    setUploadError(null);
+    setHistoryOpen(false);
+  }
+
+  function handleSelectSession(session: ChatSession) {
+    setCurrentSessionId(session.id);
+    setEntries(session.entries || []);
+    setInputText('');
+    setAttachments([]);
+    setUploadError(null);
+    setHistoryOpen(false);
+  }
+
+  function handleDeleteSession(sessionId: string) {
+    setSessions((prev) => {
+      const updated = prev.filter((s) => s.id !== sessionId);
+      saveSessions(user.uid, updated);
+      return updated;
+    });
+    if (currentSessionId === sessionId) {
+      handleStartNewChat();
+    }
+  }
+
+  function handleClearAllSessions() {
+    setSessions([]);
+    saveSessions(user.uid, []);
+    handleStartNewChat();
+  }
+
   async function handleSend(e: React.FormEvent) {
     e.preventDefault();
     if (uploading) return;
@@ -656,9 +730,44 @@ function HomePage({
         attachments: uploadedAttachments,
       };
 
-      setEntries((prev) => [...prev, newEntry]);
+      const updatedEntries = [...entries, newEntry];
+      setEntries(updatedEntries);
       setInputText('');
       setAttachments([]);
+
+      // Persist to chat history sessions
+      setSessions((prev) => {
+        const existingIdx = prev.findIndex((s) => s.id === currentSessionId);
+        const title =
+          existingIdx !== -1 && prev[existingIdx].title
+            ? prev[existingIdx].title
+            : newEntry.text
+            ? newEntry.text.slice(0, 36)
+            : uploadedAttachments.length > 0
+            ? `File: ${uploadedAttachments[0].name}`
+            : 'Conversation';
+
+        let nextSessions: ChatSession[];
+        if (existingIdx !== -1) {
+          nextSessions = [...prev];
+          nextSessions[existingIdx] = {
+            ...nextSessions[existingIdx],
+            updatedAt: Date.now(),
+            entries: updatedEntries,
+          };
+        } else {
+          const newSession: ChatSession = {
+            id: currentSessionId,
+            title,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            entries: updatedEntries,
+          };
+          nextSessions = [newSession, ...prev];
+        }
+        saveSessions(user.uid, nextSessions);
+        return nextSessions;
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Upload failed. Please try again.';
       setUploadError(msg);
@@ -680,14 +789,38 @@ function HomePage({
   return (
     <div className="auth-shell flex min-h-dvh flex-col">
       {/* Clean Navbar */}
-      <header className="border-b border-border/70 bg-card/70 backdrop-blur-md sticky top-0 z-10 px-5 py-3.5 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <CliGraphLogo className="size-9 rounded-xl shadow-md" />
-          <span className="font-display font-bold text-lg text-foreground tracking-tight">
+      <header className="border-b border-border/70 bg-card/70 backdrop-blur-md sticky top-0 z-10 px-4 sm:px-5 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2.5 sm:gap-3">
+          {/* Menu button at top left to show chat history */}
+          <button
+            type="button"
+            onClick={() => setHistoryOpen(true)}
+            aria-label="Open chat history menu"
+            title="Chat history"
+            className="flex size-9 items-center justify-center rounded-xl border border-input bg-card text-muted-foreground transition hover:border-primary/50 hover:bg-muted hover:text-foreground"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="size-4.5"
+            >
+              <line x1="4" y1="6" x2="20" y2="6" />
+              <line x1="4" y1="12" x2="20" y2="12" />
+              <line x1="4" y1="18" x2="20" y2="18" />
+            </svg>
+          </button>
+
+          <CliGraphLogo className="size-8 sm:size-9 rounded-xl shadow-md" />
+          <span className="font-display font-bold text-base sm:text-lg text-foreground tracking-tight">
             CliGraph
           </span>
         </div>
-        <div className="flex items-center gap-3">
+
+        <div className="flex items-center gap-2 sm:gap-3">
           {user.email && (
             <span className="text-xs text-muted-foreground hidden sm:inline font-medium">
               {user.email}
@@ -703,6 +836,135 @@ function HomePage({
           </button>
         </div>
       </header>
+
+      {/* Chat History Slide-Over Drawer */}
+      {historyOpen && (
+        <div className="fixed inset-0 z-50 flex">
+          <div
+            className="fixed inset-0 bg-black/75 backdrop-blur-sm transition-opacity"
+            onClick={() => setHistoryOpen(false)}
+            aria-hidden="true"
+          />
+
+          <aside className="relative flex w-full max-w-xs flex-col border-r border-border bg-card shadow-2xl">
+            {/* Drawer Header */}
+            <div className="flex items-center justify-between border-b border-border/80 px-4 py-3.5">
+              <div className="flex items-center gap-2">
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="size-5 text-primary"
+                >
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                <span className="font-display text-sm font-bold text-foreground">
+                  Chat History
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryOpen(false)}
+                aria-label="Close chat history"
+                className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-foreground"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-4.5">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            {/* New Chat Button */}
+            <div className="p-3 border-b border-border/60">
+              <button
+                type="button"
+                onClick={handleStartNewChat}
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-primary/10 border border-primary/25 text-sm font-semibold text-primary transition hover:bg-primary hover:text-primary-foreground"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="size-4">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                <span>New Chat</span>
+              </button>
+            </div>
+
+            {/* Sessions list */}
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {sessions.length === 0 ? (
+                <div className="py-12 px-4 text-center">
+                  <div className="mx-auto flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground mb-2">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="size-5">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </div>
+                  <p className="text-xs font-medium text-foreground">No chats yet</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Your sent messages and files will appear here.
+                  </p>
+                </div>
+              ) : (
+                sessions.map((sess) => {
+                  const isActive = sess.id === currentSessionId;
+                  return (
+                    <div
+                      key={sess.id}
+                      className={`group relative flex items-center justify-between rounded-xl px-3 py-2.5 text-xs transition ${
+                        isActive
+                          ? 'bg-primary/15 border border-primary/30 text-foreground font-semibold'
+                          : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleSelectSession(sess)}
+                        className="flex-1 text-left truncate mr-2"
+                      >
+                        <p className="truncate text-xs">{sess.title || 'Conversation'}</p>
+                        <p className="text-[10px] text-muted-foreground/75 font-normal mt-0.5">
+                          {formatSessionDate(sess.updatedAt)} · {sess.entries.length} message{sess.entries.length === 1 ? '' : 's'}
+                        </p>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteSession(sess.id);
+                        }}
+                        title="Delete chat"
+                        aria-label="Delete chat"
+                        className="opacity-0 group-hover:opacity-100 hover:text-destructive p-1 rounded transition text-muted-foreground"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="size-3.5">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Clear All Footer */}
+            {sessions.length > 0 && (
+              <div className="p-3 border-t border-border/80">
+                <button
+                  type="button"
+                  onClick={handleClearAllSessions}
+                  className="w-full text-center text-xs text-muted-foreground hover:text-destructive transition py-1.5 font-medium"
+                >
+                  Clear all chat history
+                </button>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
 
       {/* Main Content View */}
       <main className="flex-1 flex flex-col max-w-3xl w-full mx-auto p-4 sm:p-6 overflow-y-auto">
@@ -781,9 +1043,9 @@ function HomePage({
       </main>
 
       {/* Input bar:
-          1. placeholder to type in text and a send button by the side.
+          1. placeholder to type in text and a compact send button fitting Android/iPhone.
           2. a + on by the left to upload files to the Supabase UPLOADS bucket. */}
-      <div className="sticky bottom-0 px-4 pb-6 pt-2 max-w-3xl w-full mx-auto">
+      <div className="sticky bottom-0 px-3 sm:px-4 pb-4 sm:pb-6 pt-2 max-w-3xl w-full mx-auto">
         {uploadError && (
           <div className="mb-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-xs font-medium text-destructive flex items-center justify-between">
             <span>{uploadError}</span>
@@ -822,7 +1084,7 @@ function HomePage({
                     <polyline points="14 2 14 8 20 8" />
                   </svg>
                 )}
-                <span className="truncate max-w-[140px] font-medium">{file.name}</span>
+                <span className="truncate max-w-[120px] sm:max-w-[140px] font-medium">{file.name}</span>
                 <button
                   type="button"
                   onClick={() => removeAttachment(idx)}
@@ -847,7 +1109,7 @@ function HomePage({
 
         <form
           onSubmit={handleSend}
-          className="relative flex items-center gap-2 rounded-2xl border border-input bg-card p-1.5 shadow-lg shadow-primary/5 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 transition"
+          className="relative flex items-center gap-1.5 sm:gap-2 rounded-2xl border border-input bg-card p-1 sm:p-1.5 shadow-lg shadow-primary/5 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 transition"
         >
           <input
             type="file"
@@ -862,7 +1124,7 @@ function HomePage({
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading}
             aria-label="Upload files"
-            className="flex size-11 items-center justify-center rounded-xl text-muted-foreground transition hover:bg-muted hover:text-foreground shrink-0 disabled:opacity-40"
+            className="flex size-10 items-center justify-center rounded-xl text-muted-foreground transition hover:bg-muted hover:text-foreground shrink-0 disabled:opacity-40"
           >
             <svg
               viewBox="0 0 24 24"
@@ -882,37 +1144,32 @@ function HomePage({
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             disabled={uploading}
-            placeholder={uploading ? 'Uploading to Supabase UPLOADS…' : 'Type a message...'}
-            className="flex-1 bg-transparent px-2 text-base text-foreground outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
+            placeholder={uploading ? 'Uploading to Supabase…' : 'Type a message...'}
+            className="flex-1 bg-transparent px-1.5 sm:px-2 text-sm sm:text-base text-foreground outline-none placeholder:text-muted-foreground/70 disabled:opacity-60 min-w-0"
           />
 
+          {/* Compact Send Button optimized for mobile (Android/iPhone) */}
           <button
             type="submit"
             disabled={uploading || (!inputText.trim() && attachments.length === 0)}
-            aria-label="Send"
-            className="flex h-11 items-center justify-center gap-1.5 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:opacity-40 shrink-0"
+            aria-label="Send message"
+            className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground transition hover:bg-primary/90 active:scale-95 disabled:opacity-30 disabled:pointer-events-none shrink-0 shadow-md shadow-primary/20"
           >
             {uploading ? (
-              <>
-                <div className="size-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
-                <span className="hidden sm:inline">Uploading…</span>
-              </>
+              <div className="size-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
             ) : (
-              <>
-                <span>Send</span>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="size-4"
-                >
-                  <path d="m22 2-7 20-4-9-9-4Z" />
-                  <path d="M22 2 11 13" />
-                </svg>
-              </>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="size-4.5 translate-x-px"
+              >
+                <path d="m22 2-7 20-4-9-9-4Z" />
+                <path d="M22 2 11 13" />
+              </svg>
             )}
           </button>
         </form>
